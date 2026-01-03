@@ -117,21 +117,31 @@ end
 	@return ()  
 ]=]
 function NetworkerServer.addClientAccess(self: NetworkerServer, module: any, methods: { any }): ()
-	for _, method in methods do
-		for funcName, func in module do
-			if func ~= method then
-				continue
-			end
+    local metatable = getmetatable(module)
+    if not metatable then
+        error("Module must have a metatable (class)")
+    end
 
-			assert(self._accessLookup[funcName] == nil, "Client access method already exists: " .. funcName)
-			assert(type(func) == "function", "Client access method must be a function: " .. funcName)
+    for _, method in methods do
+        local methodName = nil
 
-			self._accessLookup[funcName] = {
-				module = module,
-				method = method,
-			}
-		end
-	end
+        for name, func in pairs(metatable) do
+            if func == method then
+                methodName = name
+                break
+            end
+        end
+
+        if methodName and methodName ~= "__index" then
+            assert(self._accessLookup[methodName] == nil, "Client access method already exists: " .. methodName)
+            assert(type(method) == "function", "Client access method must be a function: " .. methodName)
+
+            self._accessLookup[methodName] = {
+                module = module,
+                method = method,
+            }
+        end
+    end
 end
 
 --[=[
