@@ -3,6 +3,7 @@ local RunService = game:GetService("RunService")
 
 local Packages = script.Parent.Parent
 local Signal = require(Packages.Signal)
+local Janitor = require(Packages.Janitor)
 local NetworkerUtils = require(script.Parent.NetworkerUtils)
 
 type NetworkTag = NetworkerUtils.NetworkTag
@@ -21,13 +22,14 @@ export type NetworkerClient = typeof(setmetatable(
 		remotes: RemotesContainer,
 		instanceConn: RBXScriptConnection?,
 		changedSignals: { [string]: Signal.Signal<any> },
+		_janitor: any,
 	},
 	NetworkerClient
 ))
 
 --[=[
 	Constructs a new NetworkerClient  
-	@param networkTag NetworkTag -- The unqiue tag of the networker  
+	@param networkTag NetworkTag -- The unique tag of the networker  
 	@param module {} -- The class or service the networker will be communicating with  
 	@return NetworkerClient  
 ]=]
@@ -37,6 +39,7 @@ function NetworkerClient.new(networkTag: NetworkTag, module: {}): NetworkerClien
 	local self = {
 		networkTag = networkTag,
 		changedSignals = {},
+		_janitor = Janitor.new(),
 	}
 
 	setmetatable(self, NetworkerClient)
@@ -59,11 +62,11 @@ function NetworkerClient.new(networkTag: NetworkTag, module: {}): NetworkerClien
 	local remotes = script.Parent:WaitForChild("_remotes"):WaitForChild(self.networkTag) :: RemotesContainer
 	self.remotes = remotes
 
-	remotes.Destroying:Once(function()
+	self._janitor:Add(remotes.Destroying:Connect(function()
 		self:destroy()
-	end)
+	end))
 
-	remotes.RemoteEvent.OnClientEvent:Connect(function(method: string, key: string, ...: any?)
+	self._janitor:Add(remotes.RemoteEvent.OnClientEvent:Connect(function(method: string, key: string, ...: any?)
 		if method == NetworkerUtils.SET_TAG then
 			module[key] = ...
 			if self.changedSignals[key] then
@@ -72,9 +75,10 @@ function NetworkerClient.new(networkTag: NetworkTag, module: {}): NetworkerClien
 			return
 		end
 
-		assert(module[method], "Method " .. method .. " does not exist on networkTag " .. remotes.Name)
-		module[method](module, key, ...)
-	end)
+		if module[method] then
+			module[method](module, key, ...)
+		end
+	end))
 
 	return self
 end
@@ -86,7 +90,9 @@ end
 ]=]
 function NetworkerClient.getServerChangedSignal<T>(self: NetworkerClient, key: string): Signal.Signal<T>
 	if not self.changedSignals[key] then
-		self.changedSignals[key] = Signal.new()
+		local signal = Signal.new()
+		self.changedSignals[key] = signal
+		self._janitor:Add(signal, "Destroy")
 	end
 
 	return self.changedSignals[key]
@@ -99,6 +105,10 @@ end
 	@return ()  
 ]=]
 function NetworkerClient.fire(self: NetworkerClient, method: string, ...: any?): ()
+	if not self.remotes then
+		return
+	end
+
 	if RunService:IsRunning() then
 		self.remotes.RemoteEvent:FireServer(method, ...)
 	end
@@ -112,11 +122,15 @@ end
 	@yields
 ]=]
 function NetworkerClient.fetch(self: NetworkerClient, method: string, ...: any): any?
-	if not RunService:IsRunning() then
+	if not self.remotes then
 		return nil
 	end
 
-	return self.remotes.RemoteFunction:InvokeServer(method, ...)
+	if RunService:IsRunning() then
+		return self.remotes.RemoteFunction:InvokeServer(method, ...)
+	end
+
+	return nil
 end
 
 --[=[
@@ -124,15 +138,15 @@ end
 	@return ()  
 ]=]
 function NetworkerClient.destroy(self: NetworkerClient): ()
-	if self.remotes then
-		self.remotes:Destroy()
-	end
-	for _, signal in self.changedSignals do
-		signal:Destroy()
-	end
+	self._janitor:Destroy()
+	self.changedSignals = {}
+
 	if self.instanceConn then
 		self.instanceConn:Disconnect()
+		self.instanceConn = nil
 	end
+
+	self.remotes = nil
 end
 
 return NetworkerClient
